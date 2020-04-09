@@ -1,10 +1,13 @@
 const osu = require('node-os-utils')
+const nodemailer = require('nodemailer');
 
 const PLUGIN_ID = 'signalk-healthcheck'
 const PLUGIN_NAME = 'Healthcheck Service'
 
 module.exports = function(app) {
   var plugin = {};
+  var hostTimer;
+  var providerTimer = [];
 
   plugin.id = PLUGIN_ID;
   plugin.name = PLUGIN_NAME;
@@ -49,9 +52,24 @@ module.exports = function(app) {
           },
           checkMaxAttempts: {
             type: 'number',
-            title: 'Check Attemps',
+            title: 'Check Attempts',
             description: 'Number of failed checks before raising a notification.',
             default: 3
+          },
+          sendNotification: {
+            type: 'boolean',
+            title: 'Send Notification',
+            default: false
+          },
+          sendEmail: {
+            type: 'boolean',
+            title: 'Send Email',
+            default: false
+          },
+          toEmail: {
+            type: 'string',
+            title: 'Send Email To Address(es)',
+            description: 'Comma separated list of recipients email addresses',
           }
         }
       }
@@ -82,37 +100,31 @@ module.exports = function(app) {
         cpuWarning: {
           type: 'number',
           title: 'CPU Average % Warning Threshold',
-          description: '',
           default: 80
         },
         cpuAlarm: {
           type: 'number',
           title: 'CPU Average % Alarm Threshold',
-          description: '',
           default: 90
         },
         memWarning: {
           type: 'number',
           title: 'Memory Free % Warning Threshold',
-          description: '',
           default: 20
         },
         memAlarm: {
           type: 'number',
           title: 'Memory Free % Alarm Threshold',
-          description: '',
           default: 10
         },
         diskWarning: {
           type: 'number',
           title: 'Disk Free Space % Warning Threshold',
-          description: '',
           default: 20
         },
         diskAlarm: {
           type: 'number',
           title: 'Disk Free Space % Alarm Threshold',
-          description: '',
           default: 10
         },
         checkFrequency: {
@@ -123,21 +135,88 @@ module.exports = function(app) {
         },
         checkMaxAttempts: {
           type: 'number',
-          title: 'Check Attemps',
+          title: 'Check Attempts',
           description: 'Number of failed checks before raising a notification.',
           default: 3
+        },
+        sendNotification: {
+          type: 'boolean',
+          title: 'Send Notification',
+          default: false
+        },
+        sendEmail: {
+          type: 'boolean',
+          title: 'Send Email',
+          default: false
+        },
+        toEmail: {
+          type: 'string',
+          title: 'Send Email To Address(es)',
+          description: 'Comma separated list of recipients email addresses',
         }
       }
     };
     schema.properties["host"] = obj;
 
-    updateProviderSchema(schema)
+    updateProviderSchema(schema);
+
+    var mailObj = {
+      type: 'object',
+      title: 'eMail Config',
+      properties: {
+        host: {
+          type: 'string',
+          title: 'Host',
+        },
+        port: {
+          type: 'number',
+          title: 'Port',
+        },
+        secure: {
+          title: 'Secure',
+          type: 'boolean',
+          default: false
+        },
+        username: {
+          type: 'string',
+          title: 'Username',
+        },
+        password: {
+          type: 'string',
+          title: 'Password',
+        },
+        fromEmail: {
+          type: 'string',
+          title: 'From Address',
+        }
+      }
+    };
+    schema.properties["mail"] = mailObj;
+
     return schema;
   }
 
   plugin.start = function(options) {
-    // Here we put our plugin logic
-    app.debug('Plugin started');
+    if (options.host.enabled) {
+      hostCheck(options);
+
+      hostTimer = setInterval(function() {
+        hostCheck(options);
+      }, options.host.checkFrequency * 1000)
+    }
+
+    for (var provider in options.providers) {
+      if (provider.enabled) {
+        let timer = setInterval(function() {
+          //check values
+
+          //send Notification
+
+          //send email
+        }, provider.checkFrequency * 1000)
+      }
+      providerTimer.push(timer)
+    }
   };
 
   //returns full details
@@ -201,7 +280,7 @@ module.exports = function(app) {
       }
     })
 
-    router.get("/host", (req, res) => {
+    router.get("/hostInfo", (req, res) => {
       if (osu.isNotSupported()) {
         let msg = 'OS is not supported by node-os-utils'
         app.debug(msg)
@@ -212,7 +291,17 @@ module.exports = function(app) {
 
       getHostInfo().then(info => {
         res.json(info)
+      }, reason => {
+        let msg = "Could not get host info. " + reason;
+        app.debug(msg)
+        app.status(400)
+        res.send(msg)
+        return
       });
+    })
+
+    router.get("/hostState", (req, res) => {
+      res.json(hostCheck(options))
     })
   }
 
@@ -228,7 +317,7 @@ module.exports = function(app) {
     });
 
     var drive = osu.drive
-    var driveInfo = drive.info(value => {
+    var driveInfo = drive.info().then(value => {
       return value
     });
 
@@ -236,14 +325,200 @@ module.exports = function(app) {
       "cpu": {
         "averageUsage": values[0]
       },
-      "mem": values[1],
+      "memory": values[1],
       "disk": values[2]
     }));
   }
 
+  function sendEmail(to, subject, text) {
+    var transporter = nodemailer.createTransport({
+      "host": options.mail.host,
+      "port": options.mail.port,
+      "secure": options.mail.secure,
+      "auth": {
+        "user": options.mail.username,
+        "pass": options.mail.password
+      }
+    });
+
+    //use text or html
+    var mailOptions = {
+      "from": options.mail.fromEmail,
+      "to": to,
+      "subject": subject,
+      "text": text
+    };
+
+    transporter.sendMail(mailOptions, function(error, info) {
+      if (error) {
+        app.error(error);
+      } else {
+        app.log('Email sent: ' + info.response);
+      }
+    });
+  }
+
+  function handleDelta(values) {
+    let delta = {
+      "updates": [{
+        "values": values
+      }]
+    }
+    app.debug(JSON.stringify(delta))
+
+    app.handleMessage(PLUGIN_ID, delta)
+  }
+
+  function createDeltaValues(data) {
+    let basePath = "host"
+    let values = [];
+
+    for (const tlkey in data) {
+      let data2 = data[tlkey]
+      let keys = Object.keys(data2)
+      let values2 = (keys.map(key => ({
+        "path": basePath + '.' + tlkey + '.' + key,
+        "value": data2[key]
+      })))
+      values = values.concat(values2)
+    }
+    return values;
+  }
+
+  function checkHostValues(data, options) {
+    //check cpu
+    let state = {};
+    if (data.cpu.averageUsage >= options.host.cpuAlarm) {
+      state["cpu"] = {
+        "state": "alarm",
+        "field": "averageCpu",
+        "value": data.cpu.averageUsage
+      }
+    } else if (data.cpu.averageUsage >= options.host.cpuWarning) {
+      state["cpu"] = {
+        "state": "warn",
+        "field": "averageCpu",
+        "value": data.cpu.averageUsage
+      }
+    } else {
+      state["cpu"] = {
+        "state": "ok",
+        "field": "averageCpu",
+        "value": data.cpu.averageUsage
+      }
+    }
+    //check Memory
+    if (data.memory.freeMemPercentage <= options.host.memAlarm) {
+      state["memory"] = {
+        "state": "alarm",
+        "field": "freeMemPercentage",
+        "value": data.memory.freeMemPercentage
+      }
+    } else if (data.memory.freeMemPercentage <= options.host.memWarning) {
+      state["memory"] = {
+        "state": "warn",
+        "field": "freeMemPercentage",
+        "value": data.memory.freeMemPercentage
+      }
+    } else {
+      state["memory"] = {
+        "state": "ok",
+        "field": "freeMemPercentage",
+        "value": data.memory.freeMemPercentage
+      }
+    }
+    //check disk
+    if (data.disk.freePercentage <= options.host.diskAlarm) {
+      state["disk"] = {
+        "state": "alarm",
+        "field": "freePercentage",
+        "value": data.disk.freePercentage
+      }
+    } else if (data.disk.freePercentage <= options.host.diskWarning) {
+      state["disk"] = {
+        "state": "warn",
+        "field": "freePercentage",
+        "value": data.disk.freePercentage
+      }
+    } else {
+      state["disk"] = {
+        "state": "ok",
+        "field": "freePercentage",
+        "value": data.disk.freePercentage
+      }
+    }
+    return state;
+  }
+
+  function createNotification(data) {
+    let values = [];
+    let value = {
+      "state": "",
+      "method": [
+        "visual",
+        "sound"
+      ],
+      "message": "",
+    }
+
+    for (var check in data) {
+      let path = `notifications.host.${check}.${data[check].field}`;
+      let existing = app.getSelfPath(path);
+
+      if (data[check].state != "ok") {
+        value.state = data[check].state;
+        value.message = `${check} ${data[check].field} current value is ${data[check].value}. `;
+
+        values.push({
+          "path": path,
+          "value": value
+        });
+      } else if (existing) {
+        //the state must be ok so clear it
+        values.push({
+          "path": path,
+          "value": null
+        });
+      }
+    }
+    return values;
+  }
+
+  function hostCheck(options) {
+    getHostInfo().then(info => {
+      //send deltas
+      let values = createDeltaValues(info);
+      handleDelta(values)
+
+      //check for issues
+      let hostState = checkHostValues(info, options)
+
+      //send Notification
+      if (options.host.sendNotification) {
+        let values = createNotification(hostState)
+        if (values.length > 0) {
+          handleDelta(values)
+        }
+      }
+
+      //send email
+      if (options.host.sendEmail) {
+
+      }
+
+    }, reason => {
+      app.error("Could not get host info. " + reason);
+    });
+  }
+
   plugin.stop = function() {
-    // Here we put logic we need when the plugin stops
-    app.debug('Plugin stopped');
+    if (hostTimer) {
+      clearInterval(hostTimer)
+    }
+
+    if (providerTimer) {
+      clearInterval(providerTimer)
+    }
   };
 
   return plugin;

@@ -12,7 +12,8 @@
   "author": "Jeremy Carter",
   "license": "ISC",
   "dependencies": {
-    "node-os-utils": "^1.2.2"
+    "node-os-utils": "^1.2.2",
+    "nodemailer": "^6.4.6"
   },
   "repository": {
     "type": "git",
