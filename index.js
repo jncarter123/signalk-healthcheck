@@ -16,6 +16,7 @@ module.exports = function(app) {
   var providersFailureCount = {};
   var hostFailureEmailSent = false;
   var providersFailureEmailSent = {};
+  var hcOptions = {};
 
   plugin.id = PLUGIN_ID;
   plugin.name = PLUGIN_NAME;
@@ -84,7 +85,7 @@ module.exports = function(app) {
       providerSchema.properties[provider.id] = obj;
     })
 
-    schema.properties["provider"] = providerSchema;
+    schema.properties["providers"] = providerSchema;
     return schema;
   }
 
@@ -205,19 +206,28 @@ module.exports = function(app) {
   }
 
   plugin.start = function(options) {
+    hcOptions = options;
+
     if (options.host.enabled) {
-      hostCheck(options);
+      app.debug("Host checks enabled.");
+      hostCheck();
 
       hostTimer = setInterval(function() {
-        hostCheck(options);
+        hostCheck();
       }, options.host.checkFrequency * 1000)
     }
 
+    let providers = options.providers;
+    for (var providerId in providers) {
+      if (providers[providerId].enabled) {
+        app.debug(`Provider ${providerId} checks enabled.`);
 
-    for (var provider in options.providers) {
-      if (provider.enabled) {
-        providersFailureCount[provider.id] = 0;
-        providersFailureEmailSent[provider.id] = false;
+        var provider = providers[providerId];
+        provider.id = providerId;
+
+        providersFailureCount[providerId] = 0;
+        providersFailureEmailSent[providerId] = false;
+
         providerCheck(provider);
 
         providerTimers.push(setInterval(function() {
@@ -309,7 +319,7 @@ module.exports = function(app) {
     })
 
     router.get("/hostState", (req, res) => {
-      res.json(hostCheck(options))
+      res.json(hostCheck(hcOptions))
     })
   }
 
@@ -340,18 +350,18 @@ module.exports = function(app) {
 
   function sendEmail(to, subject, text) {
     var transporter = nodemailer.createTransport({
-      "host": options.mail.host,
-      "port": options.mail.port,
-      "secure": options.mail.secure,
+      "host": hcOptions.mail.host,
+      "port": hcOptions.mail.port,
+      "secure": hcOptions.mail.secure,
       "auth": {
-        "user": options.mail.username,
-        "pass": options.mail.password
+        "user": hcOptions.mail.username,
+        "pass": hcOptions.mail.password
       }
     });
 
     //use text or html
     var mailOptions = {
-      "from": options.mail.fromEmail,
+      "from": hcOptions.mail.fromEmail,
       "to": to,
       "subject": subject,
       "text": text
@@ -377,7 +387,7 @@ module.exports = function(app) {
     app.handleMessage(PLUGIN_ID, delta)
   }
 
-  function createDeltaValues(data) {
+  function createHostDeltaValues(data) {
     let basePath = "host"
     let values = [];
 
@@ -393,16 +403,28 @@ module.exports = function(app) {
     return values;
   }
 
-  function checkHostValues(data, options) {
+  function createProviderDeltaValues(providerId, data) {
+    let basePath = "provider"
+
+    let keys = Object.keys(data);
+    let values = (keys.map(key => ({
+      "path": basePath + '.' + providerId + '.' + key,
+      "value": data[key]
+    })))
+
+    return values;
+  }
+
+  function checkHostValues(data) {
     //check cpu
     let state = {};
-    if (data.cpu.averageUsage >= options.host.cpuAlarm) {
+    if (data.cpu.averageUsage >= hcOptions.host.cpuAlarm) {
       state["cpu"] = {
         "state": "alarm",
         "field": "averageCpu",
         "value": data.cpu.averageUsage
       }
-    } else if (data.cpu.averageUsage >= options.host.cpuWarning) {
+    } else if (data.cpu.averageUsage >= hcOptions.host.cpuWarning) {
       state["cpu"] = {
         "state": "warn",
         "field": "averageCpu",
@@ -416,13 +438,13 @@ module.exports = function(app) {
       }
     }
     //check Memory
-    if (data.memory.freeMemPercentage <= options.host.memAlarm) {
+    if (data.memory.freeMemPercentage <= hcOptions.host.memAlarm) {
       state["memory"] = {
         "state": "alarm",
         "field": "freeMemPercentage",
         "value": data.memory.freeMemPercentage
       }
-    } else if (data.memory.freeMemPercentage <= options.host.memWarning) {
+    } else if (data.memory.freeMemPercentage <= hcOptions.host.memWarning) {
       state["memory"] = {
         "state": "warn",
         "field": "freeMemPercentage",
@@ -436,13 +458,13 @@ module.exports = function(app) {
       }
     }
     //check disk
-    if (data.disk.freePercentage <= options.host.diskAlarm) {
+    if (data.disk.freePercentage <= hcOptions.host.diskAlarm) {
       state["disk"] = {
         "state": "alarm",
         "field": "freePercentage",
         "value": data.disk.freePercentage
       }
-    } else if (data.disk.freePercentage <= options.host.diskWarning) {
+    } else if (data.disk.freePercentage <= hcOptions.host.diskWarning) {
       state["disk"] = {
         "state": "warn",
         "field": "freePercentage",
@@ -458,7 +480,7 @@ module.exports = function(app) {
     return state;
   }
 
-  function createNotification(data) {
+  function createNotification(type, data) {
     let values = [];
     let value = {
       "state": "",
@@ -470,12 +492,13 @@ module.exports = function(app) {
     }
 
     for (var check in data) {
-      let path = `notifications.host.${check}.${data[check].field}`;
+      let path = `notifications.${type}.${check}.${data[check].field}`;
       let existing = app.getSelfPath(path);
 
       if (data[check].state != "ok") {
+        let checkC = check.charAt(0).toUpperCase() + check.slice(1);
         value.state = data[check].state;
-        value.message = `${check} ${data[check].field} current value is ${data[check].value}. `;
+        value.message = `${checkC} ${data[check].field} current value is ${data[check].value}. `;
 
         values.push({
           "path": path,
@@ -492,27 +515,27 @@ module.exports = function(app) {
     return values;
   }
 
-  function hostCheck(options) {
+  function hostCheck() {
     getHostInfo().then(info => {
       //send deltas
-      let values = createDeltaValues(info);
-      handleDelta(values)
+      let values = createHostDeltaValues(info);
+      handleDelta(values);
 
       //check for issues
-      let hostState = checkHostValues(info, options)
+      let hostState = checkHostValues(info)
       updateHostFailureCounters(hostState);
 
       //send Notification
-      if (options.host.sendNotification) {
-        let values = createNotification(hostState)
+      if (hcOptions.host.sendNotification) {
+        let values = createNotification("host", hostState)
         if (values.length > 0) {
-          handleDelta(values)
+          handleDelta(values);
         }
       }
 
       //send email
-      if (options.host.sendEmail) {
-        sendHostEmail(options, hostState);
+      if (hcOptions.host.sendEmail) {
+        sendHostEmail(hostState);
       }
 
     }, reason => {
@@ -524,17 +547,27 @@ module.exports = function(app) {
     let stats = app.providerStatistics;
 
     let pvStats = stats[provider.id];
+    if (!pvStats) {
+      app.error('Could not get statisics for ' + provider.id);
+      return;
+    }
+
+    //send deltas
+    let values = createProviderDeltaValues(provider.id, pvStats);
+    handleDelta(values);
 
     let state = checkProviderStats(pvStats, provider)
     if (state.state != "ok") {
       providersFailureCount[provider.id]++;
+      app.error(`Provider ${provider.id} #${providersFailureCount[provider.id]}`);
 
-      if (provider.sendEmail == true && providersFailureCount[provider.id] >= provider.checkMaxAttempts &&
-        providersFailureEmailSent[provider.id] == false) {
+      if (provider.sendEmail && providersFailureCount[provider.id] >= provider.checkMaxAttempts &&
+        !providersFailureEmailSent[provider.id]) {
         sendProviderEmail(provider, state);
         providersFailureEmailSent[provider.id] = true;
       }
     } else {
+      //state is ok, so clear the failure count
       providersFailureCount[provider.id] = 0;
       providersFailureEmailSent[provider.id] = false;
     }
@@ -543,42 +576,49 @@ module.exports = function(app) {
   function checkProviderStats(pvStats, options) {
     let state = {
       "state": "ok",
-      "value": pvState.deltaRate
+      "value": pvStats.deltaRate
     };
-    if (pvStats.deltaRate >= options.deltaAlarm) {
+    if (pvStats.deltaRate <= options.deltaAlarm) {
       state.state = "alarm";
-    } else if (pvStats.delaRate >= options.deltaWarning) {
+    } else if (pvStats.delaRate <= options.deltaWarning) {
       state.state = "warn";
     }
 
     return state;
   }
 
-  function sendHostEmail(options, state) {
-    let subject = "SignalK Healtcheck Host Failure";
+  function sendHostEmail(state) {
+    let subject = "SignalK Healthcheck Host ";
     let text = "";
-    for (var check in state){
-      if(state[check].state != "ok"){
-        text += `${check} ${state[check].field} current value is ${data[check].value}. `;
+    let hostState = 'Warning';
+
+    for (var check in state) {
+      if (state[check].state != "ok") {
+        if(state[check].state == "alarm") hostState = 'Alarm';
+
+        let checkC = check.charAt(0).toUpperCase() + check.slice(1);
+        text += `${checkC} ${state[check].field} current value is ${state[check].value}. \r\n`;
       }
     }
-    if(text != ""){
-      sendEmail(options.host.toEmail, subject, text);
+
+    if (text && !hostFailureEmailSent) {
+      subject += hostState;
+      sendEmail(hcOptions.host.toEmail, subject, text);
       hostFailureEmailSent = true;
-    } else {
+    } else if (!text) {
       hostFailureEmailSent = false;
     }
   }
 
-  function sendProviderEmail(provider, state) {
-    let subject = "SignalK Healtcheck Provider Failure";
-    let text = `Provider ${provider.id} has failed and is only processing ${state.value} deltas.`;
-    sendEmail(provider.toEmail, subject, text);
+  function sendProviderEmail(options, state) {
+    let subject = `SignalK Healtcheck Provider ${state.state}`;
+    let text = `Provider ${options.id} is only processing ${state.value} deltas.`;
+    sendEmail(options.toEmail, subject, text);
   }
 
-  function updateHostFailureCounters(state){
-    for (var check in state){
-      if(state[check].state != "ok"){
+  function updateHostFailureCounters(state) {
+    for (var check in state) {
+      if (state[check].state != "ok") {
         hostFailureCount[check]++;
       } else {
         hostFailureCount[check] = 0;
