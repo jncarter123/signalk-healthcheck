@@ -7,7 +7,15 @@ const PLUGIN_NAME = 'Healthcheck Service'
 module.exports = function(app) {
   var plugin = {};
   var hostTimer;
-  var providerTimer = [];
+  var providerTimers = [];
+  var hostFailureCount = {
+    "cpu": 0,
+    "memory": 0,
+    "disk": 0
+  };
+  var providersFailureCount = {};
+  var hostFailureEmailSent = false;
+  var providersFailureEmailSent = {};
 
   plugin.id = PLUGIN_ID;
   plugin.name = PLUGIN_NAME;
@@ -205,17 +213,17 @@ module.exports = function(app) {
       }, options.host.checkFrequency * 1000)
     }
 
+
     for (var provider in options.providers) {
       if (provider.enabled) {
-        let timer = setInterval(function() {
-          //check values
+        providersFailureCount[provider.id] = 0;
+        providersFailureEmailSent[provider.id] = false;
+        providerCheck(provider);
 
-          //send Notification
-
-          //send email
-        }, provider.checkFrequency * 1000)
+        providerTimers.push(setInterval(function() {
+          providerCheck(provider);
+        }, provider.checkFrequency * 1000))
       }
-      providerTimer.push(timer)
     }
   };
 
@@ -492,6 +500,7 @@ module.exports = function(app) {
 
       //check for issues
       let hostState = checkHostValues(info, options)
+      updateHostFailureCounters(hostState);
 
       //send Notification
       if (options.host.sendNotification) {
@@ -503,7 +512,7 @@ module.exports = function(app) {
 
       //send email
       if (options.host.sendEmail) {
-
+        sendHostEmail(options, hostState);
       }
 
     }, reason => {
@@ -511,13 +520,80 @@ module.exports = function(app) {
     });
   }
 
+  function providerCheck(provider) {
+    let stats = app.providerStatistics;
+
+    let pvStats = stats[provider.id];
+
+    let state = checkProviderStats(pvStats, provider)
+    if (state.state != "ok") {
+      providersFailureCount[provider.id]++;
+
+      if (provider.sendEmail == true && providersFailureCount[provider.id] >= provider.checkMaxAttempts &&
+        providersFailureEmailSent[provider.id] == false) {
+        sendProviderEmail(provider, state);
+        providersFailureEmailSent[provider.id] = true;
+      }
+    } else {
+      providersFailureCount[provider.id] = 0;
+      providersFailureEmailSent[provider.id] = false;
+    }
+  }
+
+  function checkProviderStats(pvStats, options) {
+    let state = {
+      "state": "ok",
+      "value": pvState.deltaRate
+    };
+    if (pvStats.deltaRate >= options.deltaAlarm) {
+      state.state = "alarm";
+    } else if (pvStats.delaRate >= options.deltaWarning) {
+      state.state = "warn";
+    }
+
+    return state;
+  }
+
+  function sendHostEmail(options, state) {
+    let subject = "SignalK Healtcheck Host Failure";
+    let text = "";
+    for (var check in state){
+      if(state[check].state != "ok"){
+        text += `${check} ${state[check].field} current value is ${data[check].value}. `;
+      }
+    }
+    if(text != ""){
+      sendEmail(options.host.toEmail, subject, text);
+      hostFailureEmailSent = true;
+    } else {
+      hostFailureEmailSent = false;
+    }
+  }
+
+  function sendProviderEmail(provider, state) {
+    let subject = "SignalK Healtcheck Provider Failure";
+    let text = `Provider ${provider.id} has failed and is only processing ${state.value} deltas.`;
+    sendEmail(provider.toEmail, subject, text);
+  }
+
+  function updateHostFailureCounters(state){
+    for (var check in state){
+      if(state[check].state != "ok"){
+        hostFailureCount[check]++;
+      } else {
+        hostFailureCount[check] = 0;
+      }
+    }
+  }
+
   plugin.stop = function() {
     if (hostTimer) {
       clearInterval(hostTimer)
     }
 
-    if (providerTimer) {
-      clearInterval(providerTimer)
+    if (providerTimers.length > 0) {
+      providerTimers.forEach(timer => clearInterval(timer))
+      providerTimers = [];
     }
   };
 
