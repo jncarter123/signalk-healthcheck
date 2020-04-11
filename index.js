@@ -480,7 +480,7 @@ module.exports = function(app) {
     return state;
   }
 
-  function createNotification(type, data) {
+  function createHostNotification(data) {
     let values = [];
     let value = {
       "state": "",
@@ -492,11 +492,11 @@ module.exports = function(app) {
     }
 
     for (var check in data) {
-      let path = `notifications.${type}.${check}.${data[check].field}`;
+      let path = `notifications.host.${check}.${data[check].field}`;
       let existing = app.getSelfPath(path);
 
       if (data[check].state != "ok") {
-        let checkC = check.charAt(0).toUpperCase() + check.slice(1);
+        let checkC = capitalizeWord(check);
         value.state = data[check].state;
         value.message = `${checkC} ${data[check].field} current value is ${data[check].value}. `;
 
@@ -515,6 +515,39 @@ module.exports = function(app) {
     return values;
   }
 
+  function createProviderNotification(providerId, data) {
+    let values = [];
+    let value = {
+      "state": "",
+      "method": [
+        "visual",
+        "sound"
+      ],
+      "message": "",
+    }
+
+    let path = `notifications.provider.${providerId}.deltaRate`;
+    let existing = app.getSelfPath(path);
+
+    if (data.state != "ok") {
+      value.state = data.state;
+      value.message = `${providerId} deltaRate current value is ${data.value}.`;
+
+      values.push({
+        "path": path,
+        "value": value
+      });
+    } else if (existing) {
+      //the state must be ok so clear it
+      values.push({
+        "path": path,
+        "value": null
+      });
+    }
+
+    return values;
+  }
+
   function hostCheck() {
     getHostInfo().then(info => {
       //send deltas
@@ -527,7 +560,7 @@ module.exports = function(app) {
 
       //send Notification
       if (hcOptions.host.sendNotification) {
-        let values = createNotification("host", hostState)
+        let values = createHostNotification(hostState)
         if (values.length > 0) {
           handleDelta(values);
         }
@@ -559,12 +592,23 @@ module.exports = function(app) {
     let state = checkProviderStats(pvStats, provider)
     if (state.state != "ok") {
       providersFailureCount[provider.id]++;
-      app.error(`Provider ${provider.id} #${providersFailureCount[provider.id]}`);
+      app.error(`Provider ${provider.id} error #${providersFailureCount[provider.id]}`);
 
-      if (provider.sendEmail && providersFailureCount[provider.id] >= provider.checkMaxAttempts &&
-        !providersFailureEmailSent[provider.id]) {
-        sendProviderEmail(provider, state);
-        providersFailureEmailSent[provider.id] = true;
+
+      if (providersFailureCount[provider.id] >= provider.checkMaxAttempts) {
+        //send notifications
+        if (provider.sendNotification) {
+          let values = createProviderNotification(provider.id, state)
+          if (values.length > 0) {
+            handleDelta(values);
+          }
+        }
+
+        //send email
+        if (provider.sendEmail && !providersFailureEmailSent[provider.id]) {
+          sendProviderEmail(provider, state);
+          providersFailureEmailSent[provider.id] = true;
+        }
       }
     } else {
       //state is ok, so clear the failure count
@@ -594,9 +638,9 @@ module.exports = function(app) {
 
     for (var check in state) {
       if (state[check].state != "ok") {
-        if(state[check].state == "alarm") hostState = 'Alarm';
+        if (state[check].state == "alarm") hostState = 'Alarm';
 
-        let checkC = check.charAt(0).toUpperCase() + check.slice(1);
+        let checkC = capitalizeWord(check);
         text += `${checkC} ${state[check].field} current value is ${state[check].value}. \r\n`;
       }
     }
@@ -611,7 +655,8 @@ module.exports = function(app) {
   }
 
   function sendProviderEmail(options, state) {
-    let subject = `SignalK Healtcheck Provider ${state.state}`;
+    let providerState = capitalizeWord(state.state);
+    let subject = `SignalK Healtcheck Provider ${providerState}`;
     let text = `Provider ${options.id} is only processing ${state.value} deltas.`;
     sendEmail(options.toEmail, subject, text);
   }
@@ -623,6 +668,14 @@ module.exports = function(app) {
       } else {
         hostFailureCount[check] = 0;
       }
+    }
+  }
+
+  function capitalizeWord(word) {
+    if (typeof word == 'string') {
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    } else {
+      return word;
     }
   }
 
