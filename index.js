@@ -1,5 +1,6 @@
 const osu = require('node-os-utils')
 const nodemailer = require('nodemailer');
+const os = require('os');
 
 const PLUGIN_ID = 'signalk-healthcheck'
 const PLUGIN_NAME = 'Healthcheck Service'
@@ -192,6 +193,7 @@ module.exports = function(app) {
         },
         password: {
           type: 'string',
+          format: 'password',
           title: 'Password',
         },
         fromEmail: {
@@ -632,12 +634,15 @@ module.exports = function(app) {
   }
 
   function sendHostEmail(state) {
-    let subject = "SignalK Healthcheck Host ";
-    let text = "";
+    let hostname = os.hostname();
+    let subject = `${hostname} SignalK Healthcheck Host `;
+    let text = `Host: ${hostname}\r\n`;
     let hostState = 'Warning';
 
+    let failure = false;
     for (var check in state) {
       if (state[check].state != "ok") {
+        failure = true;
         if (state[check].state == "alarm") hostState = 'Alarm';
 
         let checkC = capitalizeWord(check);
@@ -645,7 +650,7 @@ module.exports = function(app) {
       }
     }
 
-    if (text && !hostFailureEmailSent) {
+    if (failure && !hostFailureEmailSent) {
       subject += hostState;
       sendEmail(hcOptions.host.toEmail, subject, text);
       hostFailureEmailSent = true;
@@ -656,8 +661,9 @@ module.exports = function(app) {
 
   function sendProviderEmail(options, state) {
     let providerState = capitalizeWord(state.state);
-    let subject = `SignalK Healtcheck Provider ${providerState}`;
-    let text = `Provider ${options.id} is only processing ${state.value} deltas.`;
+    let hostname = os.hostname();
+    let subject = `${hostname}: SignalK Healtcheck Provider ${providerState}`;
+    let text = `Host: ${hostname} \r\nProvider ${options.id} is only processing ${state.value} deltas.`;
     sendEmail(options.toEmail, subject, text);
   }
 
