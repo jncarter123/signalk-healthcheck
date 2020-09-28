@@ -398,7 +398,7 @@ module.exports = function(app) {
       let keys = Object.keys(data2)
       let values2 = (keys.map(key => ({
         "path": basePath + '.' + tlkey + '.' + key,
-        "value": data2[key]
+        "value": parseFloat(data2[key])
       })))
       values = values.concat(values2)
     }
